@@ -40,77 +40,72 @@ public class MapReduceSequentialRunner<KEY_INTER, VALUE_INTER, KEY_OUT, VALUE_OU
                 job.getComparator()
             ));
         }
-        PartitionedFileSink<KEY_INTER, VALUE_INTER> partitionedFileSink = new PartitionedFileSink<>(
-            sortedFileSinks, job.getHasher()
-        );
+        try (PartitionedFileSink<KEY_INTER, VALUE_INTER> partitionedFileSink =
+                 new PartitionedFileSink<>(sortedFileSinks, job.getHasher())) {
+            for (Path inputFileToProcess: filesToMap) {
+                BufferedReader reader = Files.newBufferedReader(inputFileToProcess);
+                String line = reader.readLine();
 
-        for (Path inputFileToProcess: filesToMap) {
-            BufferedReader reader = Files.newBufferedReader(inputFileToProcess);
-            String line = reader.readLine();
+                Iterator<Pair<String, String>> iterator = new Iterator<>() {
+                    String nextLine = line;
 
-            Iterator<Pair<String, String>> iterator = new Iterator<>() {
-                String nextLine = line;
-
-                @Override
-                public boolean hasNext() {
-                    return nextLine != null;
-                }
-
-                @Override
-                public Pair<String, String> next() {
-                    if (!hasNext()) {
-                        throw new RuntimeException();
+                    @Override
+                    public boolean hasNext() {
+                        return nextLine != null;
                     }
-                    String currentLine = nextLine;
+
+                    @Override
+                    public Pair<String, String> next() {
+                        if (!hasNext()) {
+                            throw new RuntimeException();
+                        }
+                        String currentLine = nextLine;
+                        try {
+                            nextLine = reader.readLine();
+                        } catch (IOException e) {
+                            throw new RuntimeException();
+                        }
+                        return new Pair<>(inputFileToProcess.toString(), currentLine);
+                    }
+                };
+
+                job.getMapper().map(iterator, (outputKey, outputValue) -> {
                     try {
-                        nextLine = reader.readLine();
+                        partitionedFileSink.put(outputKey, outputValue);
                     } catch (IOException e) {
                         throw new RuntimeException();
                     }
-                    return new Pair<>(inputFileToProcess.toString(), currentLine);
-                }
-            };
-
-            job.getMapper().map(iterator, (outputKey, outputValue) -> {
-                try {
-                    partitionedFileSink.put(outputKey, outputValue);
-                } catch (IOException e) {
-                    throw new RuntimeException();
-                }
-            });
+                });
+            }
         }
-        partitionedFileSink.close();
     }
 
     private void reduceJob(List<Path> mappersOutputFiles, int reducerId) throws IOException {
-        FileSink<KEY_OUT, VALUE_OUT> fileSink = new FileSink<>(
-            job.getSerializerOutKey(),
-            job.getSerializerOutValue(),
-            Files.createFile(outputDirectory.resolve("output-" + reducerId + ".txt"))
-        );
-
         List<Iterator<Pair<KEY_INTER, VALUE_INTER>>> fileIterators = new ArrayList<>();
         for (Path mappersOutputFile : mappersOutputFiles) {
             fileIterators.add(new KeyValueFileIterator<>(
                 mappersOutputFile, job.getDeserializerInterKey(), job.getDeserializerInterValue()
             ));
         }
-        GroupedKeyValuesIterator<KEY_INTER, VALUE_INTER> groupedIterator = new GroupedKeyValuesIterator<>(
+
+        try (FileSink<KEY_OUT, VALUE_OUT> fileSink = new FileSink<>(
+            job.getSerializerOutKey(),
+            job.getSerializerOutValue(),
+            Files.createFile(outputDirectory.resolve("output-" + reducerId + ".txt"))
+        ); GroupedKeyValuesIterator<KEY_INTER, VALUE_INTER> groupedIterator = new GroupedKeyValuesIterator<>(
             new MergedKeyValueIterator<>(fileIterators, job.getComparator())
-        );
-
-        while (groupedIterator.hasNext()) {
-            Pair<KEY_INTER, Iterator<VALUE_INTER>> currentGroup = groupedIterator.next();
-
-            job.getReducer().reduce(currentGroup.key(), currentGroup.value(), (outputKey, outputValue) -> {
-                try {
-                    fileSink.put(outputKey, outputValue);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-            });
+        )) {
+            while (groupedIterator.hasNext()) {
+                Pair<KEY_INTER, Iterator<VALUE_INTER>> currentGroup = groupedIterator.next();
+                job.getReducer().reduce(currentGroup.key(), currentGroup.value(), (outputKey, outputValue) -> {
+                    try {
+                        fileSink.put(outputKey, outputValue);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+            }
         }
-        fileSink.close();
     }
 
     @Override

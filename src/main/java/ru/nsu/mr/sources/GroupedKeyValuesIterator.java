@@ -2,10 +2,11 @@ package ru.nsu.mr.sources;
 
 import ru.nsu.mr.Pair;
 
+import java.io.IOException;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 
-public class GroupedKeyValuesIterator<K, V> implements Iterator<Pair<K, Iterator<V>>> {
+public class GroupedKeyValuesIterator<K, V> implements Iterator<Pair<K, Iterator<V>>>, AutoCloseableSource {
     private final Iterator<Pair<K, V>> inputIterator;
     private Pair<K, V> currentInputRecord;
 
@@ -53,5 +54,12 @@ public class GroupedKeyValuesIterator<K, V> implements Iterator<Pair<K, Iterator
                 return result;
             }
         });
+    }
+
+    @Override
+    public void close() throws IOException {
+        if (inputIterator instanceof AutoCloseableSource) {
+            ((AutoCloseableSource) inputIterator).close();
+        }
     }
 }

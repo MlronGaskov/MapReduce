@@ -10,7 +10,7 @@ import java.nio.file.Path;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 
-public class KeyValueFileIterator<K, V> implements Iterator<Pair<K, V>> {
+public class KeyValueFileIterator<K, V> implements Iterator<Pair<K, V>>, AutoCloseableSource {
     private final BufferedReader reader;
     private String nextLine;
 
@@ -59,6 +59,7 @@ public class KeyValueFileIterator<K, V> implements Iterator<Pair<K, V>> {
         return new Pair<>(key, value);
     }
 
+    @Override
     public void close() throws IOException {
         reader.close();
     }

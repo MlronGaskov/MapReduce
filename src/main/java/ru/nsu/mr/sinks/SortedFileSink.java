@@ -59,12 +59,12 @@ public class SortedFileSink<K, V> implements FileSystemSink<K, V> {
         }
         buffer.sort(Comparator.comparing(Pair::key, comparator));
         dumps.add(Files.createTempFile("dump_" + dumps.size(), ".txt"));
-        FileSink<K, V> tempSink = new FileSink<>(keySerializer, valueSerializer, dumps.getLast());
-        for (Pair<K, V> pair : buffer) {
-            tempSink.put(pair.key(), pair.value());
+        try (FileSink<K, V> tempSink = new FileSink<>(keySerializer, valueSerializer, dumps.getLast())) {
+            for (Pair<K, V> pair : buffer) {
+                tempSink.put(pair.key(), pair.value());
+            }
         }
         buffer.clear();
-        tempSink.close();
     }
 
     @Override
@@ -78,15 +78,18 @@ public class SortedFileSink<K, V> implements FileSystemSink<K, V> {
             dumpsIterators.add(dumpIterator);
         }
 
-        MergedKeyValueIterator<K, V> mergedDumps = new MergedKeyValueIterator<>(dumpsIterators, comparator);
-        FileSink<K, V> outputFileSink = new FileSink<>(keySerializer, valueSerializer, outputPath);
-        while (mergedDumps.hasNext()) {
-            Pair<K, V> KeyValue = mergedDumps.next();
-            outputFileSink.put(KeyValue.key(), KeyValue.value());
+        try (FileSink<K, V> outputFileSink = new FileSink<>(keySerializer, valueSerializer, outputPath);
+             MergedKeyValueIterator<K, V> mergedDumps = new MergedKeyValueIterator<>(dumpsIterators, comparator)) {
+            while (mergedDumps.hasNext()) {
+                Pair<K, V> KeyValue = mergedDumps.next();
+                outputFileSink.put(KeyValue.key(), KeyValue.value());
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        } finally {
+            for (Path dump : dumps) {
+                Files.deleteIfExists(dump);
+            }
         }
-        for (Path dump : dumps) {
-            Files.deleteIfExists(dump);
-        }
-        outputFileSink.close();
     }
 }
