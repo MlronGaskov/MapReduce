@@ -16,7 +16,7 @@ public class PartitionedFileSink<K, V> implements FileSystemSink<K, V> {
 
     @Override
     public void put(K key, V value) throws IOException {
-        sinks.get(hasher.hash(key) % sinks.size()).put(key, value);
+        sinks.get((hasher.hash(key) % sinks.size() + sinks.size()) % sinks.size()).put(key, value);
     }
 
     @Override
