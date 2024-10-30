@@ -2,10 +2,15 @@ package ru.nsu.mr;
 
 import ru.nsu.mr.config.Configuration;
 import ru.nsu.mr.config.ConfigurationOption;
-import ru.nsu.mr.sorter.ExternalMergeSort;
+import ru.nsu.mr.sinks.FileSink;
+import ru.nsu.mr.sinks.FileSystemSink;
+import ru.nsu.mr.sinks.PartitionedFileSink;
+import ru.nsu.mr.sinks.SortedFileSink;
+import ru.nsu.mr.sources.GroupedKeyValuesIterator;
+import ru.nsu.mr.sources.KeyValueFileIterator;
+import ru.nsu.mr.sources.MergedKeyValueIterator;
 
 import java.io.BufferedReader;
-import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -15,36 +20,33 @@ public class MapReduceSequentialRunner<KEY_INTER, VALUE_INTER, KEY_OUT, VALUE_OU
     implements MapReduceRunner<KEY_INTER, VALUE_INTER, KEY_OUT, VALUE_OUT>
 {
     private MapReduceJob<KEY_INTER, VALUE_INTER, KEY_OUT, VALUE_OUT> job;
+    private Configuration configuration;
     private Path outputDirectory;
     private Path mappersOutputPath;
-
-
-    private int reducersCount;
 
     public MapReduceSequentialRunner() {
     }
 
-    private void mapperJob(List<Path> filesToMap, int mapperId) {
-        List<BufferedWriter> writers = new ArrayList<>(reducersCount);
-        for (int j = 0; j < reducersCount; ++j) {
-            try {
-                writers.add(Files.newBufferedWriter(outputDirectory
-                    .resolve(mappersOutputPath)
-                    .resolve("mapper-output-" + mapperId + "-" + j + ".txt")));
-            } catch (IOException e) {
-                throw new RuntimeException();
-            }
+    private void mapperJob(List<Path> filesToMap, int mapperId) throws IOException {
+        List<FileSystemSink<KEY_INTER, VALUE_INTER>> sortedFileSinks = new ArrayList<>();
+        for (int i = 0; i < configuration.get(ConfigurationOption.REDUCERS_COUNT); ++i) {
+            sortedFileSinks.add(new SortedFileSink<>(
+                job.getSerializerInterKey(),
+                job.getSerializerInterValue(),
+                job.getDeserializerInterKey(),
+                job.getDeserializerInterValue(),
+                Files.createFile(mappersOutputPath.resolve("mapper-output-" + mapperId + "-" + i + ".txt")),
+                configuration.get(ConfigurationOption.SORTER_IN_MEMORY_RECORDS),
+                job.getComparator()
+            ));
         }
+        PartitionedFileSink<KEY_INTER, VALUE_INTER> partitionedFileSink = new PartitionedFileSink<>(
+            sortedFileSinks, job.getHasher()
+        );
 
         for (Path inputFileToProcess: filesToMap) {
-            BufferedReader reader;
-            String line;
-            try {
-                reader = Files.newBufferedReader(inputFileToProcess);
-                line = reader.readLine();
-            } catch (IOException e) {
-                throw new RuntimeException();
-            }
+            BufferedReader reader = Files.newBufferedReader(inputFileToProcess);
+            String line = reader.readLine();
 
             Iterator<Pair<String, String>> iterator = new Iterator<>() {
                 String nextLine = line;
@@ -70,117 +72,45 @@ public class MapReduceSequentialRunner<KEY_INTER, VALUE_INTER, KEY_OUT, VALUE_OU
             };
 
             job.getMapper().map(iterator, (outputKey, outputValue) -> {
-                int reducerIndex = determineReducerIndex(outputKey);
-                String keySerialized = job.getSerializerInterKey().serialize(outputKey);
-                String valueSerialized = job.getSerializerInterValue().serialize(outputValue);
                 try {
-                    writers.get(reducerIndex).write(keySerialized + " " + valueSerialized);
-                    writers.get(reducerIndex).newLine();
+                    partitionedFileSink.put(outputKey, outputValue);
                 } catch (IOException e) {
-                    throw new RuntimeException(e);
+                    throw new RuntimeException();
                 }
             });
         }
-        try {
-            for (BufferedWriter writer: writers) {
-                writer.close();
-            }
-        } catch (IOException e) {
-            throw new RuntimeException();
-        }
-        for (int i = 0; i < reducersCount; ++i) {
-            sortFileByKey(mappersOutputPath.resolve("mapper-output-" + mapperId + "-" + i + ".txt"));
-        }
+        partitionedFileSink.close();
     }
 
-    private void sortFileByKey(Path fileToSort){
-        List<Pair<String, String>> pairs = new ArrayList<>();
-
-        try (BufferedReader reader = Files.newBufferedReader(fileToSort)) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String[] parts = line.split(" ", 2);
-                String key = parts[0];
-                String value = parts[1];
-                pairs.add(new Pair<>(key, value));
-            }
-        } catch (IOException e) {
-            throw new RuntimeException();
-        }
-
-        pairs.sort(Comparator.comparing(Pair::key));
-
-        try (BufferedWriter writer = Files.newBufferedWriter(fileToSort)) {
-            for (Pair<String, String> pair : pairs) {
-                writer.write(pair.key() + " " + pair.value());
-                writer.newLine();
-            }
-        } catch (IOException e) {
-            throw new RuntimeException();
-        }
-    }
-
-    private int determineReducerIndex(KEY_INTER key) {
-        return Math.abs(job.getHasher().hash(key)) % reducersCount;
-    }
-
-    @SuppressWarnings("unchecked")
-    private void reduceJob(List<Path> mappersOutputFiles, int reducerId) {
-        Iterator<Pair<KEY_INTER, VALUE_INTER>> iteratorKeyValue = ExternalMergeSort.merge(
-            job.getComparator(),
-            job.getDeserializerInterKey(),
-            job.getDeserializerInterValue(),
-            mappersOutputFiles
+    private void reduceJob(List<Path> mappersOutputFiles, int reducerId) throws IOException {
+        FileSink<KEY_OUT, VALUE_OUT> fileSink = new FileSink<>(
+            job.getSerializerOutKey(),
+            job.getSerializerOutValue(),
+            Files.createFile(outputDirectory.resolve("output-" + reducerId + ".txt"))
         );
-        Path outputFile = outputDirectory.resolve("output-" + reducerId + ".txt");
-        if (!iteratorKeyValue.hasNext()) {
-            return;
+
+        List<Iterator<Pair<KEY_INTER, VALUE_INTER>>> fileIterators = new ArrayList<>();
+        for (Path mappersOutputFile : mappersOutputFiles) {
+            fileIterators.add(new KeyValueFileIterator<>(
+                mappersOutputFile, job.getDeserializerInterKey(), job.getDeserializerInterValue()
+            ));
         }
+        GroupedKeyValuesIterator<KEY_INTER, VALUE_INTER> groupedIterator = new GroupedKeyValuesIterator<>(
+            new MergedKeyValueIterator<>(fileIterators, job.getComparator())
+        );
 
-        BufferedWriter writer;
-        try {
-            writer = Files.newBufferedWriter(outputFile);
-        } catch (IOException e) {
-            throw new RuntimeException();
-        }
+        while (groupedIterator.hasNext()) {
+            Pair<KEY_INTER, Iterator<VALUE_INTER>> currentGroup = groupedIterator.next();
 
-
-        final Pair<KEY_INTER, VALUE_INTER>[] currentKeyValue = new Pair[]{iteratorKeyValue.next()};
-        while (currentKeyValue[0] != null) {
-            KEY_INTER currentKey = currentKeyValue[0].key();
-            Iterator<VALUE_INTER> iterator = new Iterator<VALUE_INTER>() {
-                boolean isKeyChanged = false;
-                @Override
-                public boolean hasNext() {
-                    return currentKeyValue[0] != null && !isKeyChanged;
-                }
-
-                @Override
-                public VALUE_INTER next() {
-                    Pair<KEY_INTER, VALUE_INTER> prev = currentKeyValue[0];
-                    currentKeyValue[0] = iteratorKeyValue.next();
-                    if (currentKeyValue[0] == null || currentKeyValue[0].key() != prev.key()) {
-                        isKeyChanged = true;
-                    }
-                    return prev.value();
-                }
-            };
-            job.getReducer().reduce(currentKey, iterator, (outputKey, outputValue) -> {
+            job.getReducer().reduce(currentGroup.key(), currentGroup.value(), (outputKey, outputValue) -> {
                 try {
-                    String keySerialized = job.getSerializerOutKey().serialize(outputKey);
-                    String valueSerialized = job.getSerializerOutValue().serialize(outputValue);
-                    writer.write(keySerialized + " " + valueSerialized);
-                    writer.newLine();
+                    fileSink.put(outputKey, outputValue);
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
             });
         }
-        try {
-            writer.close();
-        } catch (IOException e) {
-            throw new RuntimeException();
-        }
+        fileSink.close();
     }
 
     @Override
@@ -192,11 +122,11 @@ public class MapReduceSequentialRunner<KEY_INTER, VALUE_INTER, KEY_OUT, VALUE_OU
         Path outputDirectory)
     {
         this.job = job;
+        this.configuration = configuration;
         this.outputDirectory = outputDirectory;
         this.mappersOutputPath = mappersOutputDirectory;
 
         int mappersCount = configuration.get(ConfigurationOption.MAPPERS_COUNT);
-        reducersCount = configuration.get(ConfigurationOption.REDUCERS_COUNT);
 
         int numberOfProcessedInputFiles = 0;
         for (int i = 0; i < mappersCount; ++i) {
@@ -206,15 +136,23 @@ public class MapReduceSequentialRunner<KEY_INTER, VALUE_INTER, KEY_OUT, VALUE_OU
                 Path inputFileToProcess = inputFiles.get(numberOfProcessedInputFiles + k);
                 inputFilesToProcess.add(inputFileToProcess);
             }
-            mapperJob(inputFilesToProcess, i);
+            try {
+                mapperJob(inputFilesToProcess, i);
+            } catch (IOException e) {
+                throw new RuntimeException();
+            }
             numberOfProcessedInputFiles += inputFilesToProcessCount;
         }
-        for (int i = 0; i < reducersCount; ++i) {
+        for (int i = 0; i < configuration.get(ConfigurationOption.REDUCERS_COUNT); ++i) {
             List<Path> interFilesToReduce = new ArrayList<>();
             for (int k = 0; k < mappersCount; ++k) {
                 interFilesToReduce.add(mappersOutputPath.resolve("mapper-output-" + k + "-" + i + ".txt"));
             }
-            reduceJob(interFilesToReduce, i);
+            try {
+                reduceJob(interFilesToReduce, i);
+            } catch (IOException e) {
+                throw new RuntimeException();
+            }
         }
     }
 }
