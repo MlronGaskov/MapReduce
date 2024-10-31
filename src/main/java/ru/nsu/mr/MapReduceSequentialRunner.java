@@ -108,7 +108,7 @@ public class MapReduceSequentialRunner<KEY_INTER, VALUE_INTER, KEY_OUT, VALUE_OU
             throw new RuntimeException();
         }
 
-        pairs.sort(Comparator.comparing(Pair::value));
+        pairs.sort(Comparator.comparing(Pair::key));
 
         try (BufferedWriter writer = Files.newBufferedWriter(fileToSort)) {
             for (Pair<String, String> pair : pairs) {

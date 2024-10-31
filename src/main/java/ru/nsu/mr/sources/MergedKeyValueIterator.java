@@ -2,9 +2,10 @@ package ru.nsu.mr.sources;
 
 import ru.nsu.mr.Pair;
 
+import java.io.IOException;
 import java.util.*;
 
-public class MergedKeyValueIterator<K, V> implements Iterator<Pair<K, V>> {
+public class MergedKeyValueIterator<K, V> implements Iterator<Pair<K, V>>, AutoCloseableSource {
     private final PriorityQueue<Pair<Pair<K, V>, Integer>> minHeap;
     private final List<Iterator<Pair<K, V>>> iterators;
 
@@ -39,5 +40,14 @@ public class MergedKeyValueIterator<K, V> implements Iterator<Pair<K, V>> {
         }
 
         return result;
+    }
+
+    @Override
+    public void close() throws IOException {
+        for (Iterator<Pair<K, V>> iterator : iterators) {
+            if (iterator instanceof AutoCloseableSource) {
+                ((AutoCloseableSource) iterator).close();
+            }
+        }
     }
 }
